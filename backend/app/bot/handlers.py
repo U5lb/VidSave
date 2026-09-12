@@ -31,11 +31,21 @@ async def cmd_start(message: Message):
         if workers_online > 0
         else "Серверы скачивания временно недоступны."
     )
-    await message.answer(f"Панель управления загрузками.\n{status_text}")
+    text = f"Панель управления загрузками.\n\n{status_text}"
+
+    if settings.MAIN_PHOTO_ID:
+        await message.answer_photo(
+            photo=settings.MAIN_PHOTO_ID,
+            caption=text,
+        )
+    else:
+        await message.answer(text=text)
 
 
 @router.message(F.photo)
 async def get_photo_id(message: Message):
+    if message.photo is None:
+        return
     photo_id = message.photo[-1].file_id
     await message.answer(
         f"ID фото для .env:\n`MAIN_PHOTO_ID={photo_id}`", parse_mode="Markdown"
@@ -44,12 +54,16 @@ async def get_photo_id(message: Message):
 
 @router.message(F.text)
 async def handle_youtube_links(message: Message, session: AsyncSession):
+    if message.photo is None:
+        return
+    if message.from_user is None:
+        return
+    if not message.entities:
+        return
     """
     Парсинг YouTube ссылок, очистка чата от исходного сообщения
     и формирование черновика задачи в БД.
     """
-    if not message.entities:
-        return
 
     youtube_links = []
     for entity in message.entities:
@@ -102,6 +116,11 @@ async def handle_youtube_links(message: Message, session: AsyncSession):
 async def process_format_selection(
     callback: CallbackQuery, callback_data: TaskAction, session: AsyncSession
 ):
+
+    if callback.message is None:
+        return
+    if callback.from_user is None:
+        return
     """
     Обработка выбора формата.
     Включает механизм повторных попыток отправки задачи воркеру (retry_logic).
@@ -109,9 +128,16 @@ async def process_format_selection(
     """
     await callback.answer()
 
+    if not isinstance(callback.message, Message):
+        await callback.answer(
+            "Сообщение устарело. Отправьте ссылку заново.", show_alert=True
+        )
+        return
+
     task = await session.get(Task, callback_data.task_id)
     if not task:
-        await callback.message.edit_text("Ошибка: Задача устарела или не найдена.")
+        # await callback.message.edit_text("Ошибка: Задача устарела или не найдена.")
+        await callback.answer(text="Задача устарела или не найдена.", show_alert=True)
         return
 
     # Фиксация выбора пользователя и координат интерфейса
