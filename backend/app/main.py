@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Инициализация базы данных...")
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)  # НЕ ЗАБЫТЬ УДАЛИТЬ
         await conn.run_sync(Base.metadata.create_all)
 
     logger.info("Настройка визуального профиля и меню бота...")
