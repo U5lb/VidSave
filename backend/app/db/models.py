@@ -23,3 +23,4 @@ class Task(Base):
         String
     )  # Хранит 'audio' или 'video'
     status: Mapped[str] = mapped_column(String, default="draft")
+    worker_id: Mapped[str | None] = mapped_column(String)

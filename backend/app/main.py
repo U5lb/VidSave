@@ -7,8 +7,10 @@ from app.bot.middlewares import DbSessionMiddleware, MaintenanceMiddleware
 from app.core.config import settings
 from app.core.ws_manager import ws_manager
 from app.db.database import Base, async_session_maker, engine
+from app.db.models import Task
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from loguru import logger
+from sqlalchemy import select, update
 
 # Регистрация мидлварей
 dp.message.outer_middleware(MaintenanceMiddleware(is_maintenance=False))
@@ -71,14 +73,61 @@ async def worker_endpoint(
         await websocket.close(code=1008)
         return
 
-    # Подключаем воркера и добавляем в словарь
     await ws_manager.connect(worker_id, websocket)
 
     try:
         while True:
+            # Ждем JSON от Воркера
             data = await websocket.receive_json()
-            print(f"Воркер {worker_id} прислал данные: {data}")
+            action = data.get("action")
+
+            # Воркер просит работу
+            if action == "get_task":
+                async with async_session_maker() as session:
+                    # Ищем самую старую задачу в статусе pending
+                    stmt = (
+                        select(Task)
+                        .where(Task.status == "pending")
+                        .order_by(Task.id.asc())
+                        .limit(1)
+                    )
+                    result = await session.execute(stmt)
+                    task = result.scalar_one_or_none()
+
+                    if task:
+                        # Бронируем задачу за этим воркером
+                        task.status = "processing"
+                        task.worker_id = worker_id
+                        await session.commit()
+
+                        # Отправляем задачу воркеру
+                        await websocket.send_json(
+                            {
+                                "task_id": task.id,
+                                "url": task.url,
+                                "format_type": task.format_type,
+                            }
+                        )
+                    else:
+                        # Работы нет
+                        await websocket.send_json({"action": "idle"})
+
+            # Здесь позже добавим обработку "meta_ready" и "progress"
 
     except WebSocketDisconnect:
-        # Если связь оборвалась - безопасно удаляем воркера из словаря
+        # Воркер отвалился. Начинаем процедуру спасения задач.
         ws_manager.disconnect(worker_id)
+
+        async with async_session_maker() as session:
+            # Находим все задачи, которые этот воркер не успел доделать, и возвращаем в очередь
+            stmt = (
+                update(Task)
+                .where(
+                    Task.worker_id == worker_id,
+                    Task.status.in_(["processing", "fetching_meta"]),
+                )
+                .values(status="pending", worker_id=None)
+            )
+
+            await session.execute(stmt)
+            await session.commit()
