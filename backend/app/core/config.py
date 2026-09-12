@@ -6,7 +6,11 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     DB_URL: str
     WEB_APP_URL: str
+<<<<<<< HEAD
     MAIN_PHOTO_ID: str | None = None
+=======
+    WORKER_TOKEN: SecretStr
+>>>>>>> add-websocket
 
     model_config = SettingsConfigDict(
         env_file="../.env", env_file_encoding="utf-8", extra="ignore"
