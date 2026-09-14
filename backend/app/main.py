@@ -1,8 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+from aiogram.types import InputMediaPhoto
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.bot.core import bot, dp, set_app_menu, set_bot_avatar
-from app.bot.handlers import router
+from app.bot.handlers import TaskAction, router
 from app.bot.middlewares import DbSessionMiddleware, MaintenanceMiddleware
 from app.core.config import settings
 from app.core.ws_manager import ws_manager
@@ -85,10 +87,10 @@ async def worker_endpoint(
             # Воркер просит работу
             if action == "get_task":
                 async with async_session_maker() as session:
-                    # Ищем самую старую задачу в статусе pending
+                    # 1. ИЩЕМ И PENDING, И READY_TO_DOWNLOAD
                     stmt = (
                         select(Task)
-                        .where(Task.status == "pending")
+                        .where(Task.status.in_(["pending", "ready_to_download"]))
                         .order_by(Task.id.asc())
                         .limit(1)
                     )
@@ -96,24 +98,108 @@ async def worker_endpoint(
                     task = result.scalar_one_or_none()
 
                     if task:
-                        # Бронируем задачу за этим воркером
-                        task.status = "processing"
+                        # 2. ОПРЕДЕЛЯЕМ КОМАНДУ
+                        command = "get_meta" if task.status == "pending" else "download"
+
+                        # 3. МЕНЯЕМ СТАТУС В ЗАВИСИМОСТИ ОТ КОМАНДЫ
+                        task.status = (
+                            "fetching_meta" if command == "get_meta" else "downloading"
+                        )
                         task.worker_id = worker_id
                         await session.commit()
 
-                        # Отправляем задачу воркеру
+                        # 4. ОТПРАВЛЯЕМ КОМАНДУ ВОРКЕРУ
                         await websocket.send_json(
                             {
+                                "command": command,  # Добавлено поле command
                                 "task_id": task.id,
                                 "url": task.url,
                                 "format_type": task.format_type,
                             }
                         )
                     else:
-                        # Работы нет
                         await websocket.send_json({"action": "idle"})
 
-            # Здесь позже добавим обработку "meta_ready" и "progress"
+            # Обработка мета данных
+            elif action == "meta_ready":
+                task_id = data.get("task_id")
+                has_timecodes = data.get("has_timecodes")
+                title = data.get("title")
+                channel = data.get("channel")
+                thumbnail_url = data.get("thumbnail")
+
+                async with async_session_maker() as session:
+                    task = await session.get(Task, task_id)
+                    if task and task.chat_id and task.message_id:
+                        task.title = title
+                        task.channel = channel
+
+                        channel_link = f"[{channel}]({task.url})"
+                        base_text = f"*Видео: {title}*\nКанал: {channel_link}\n\n"
+
+                        if task.format_type == "audio" and has_timecodes:
+                            task.status = "awaiting_cut"
+                            await session.commit()
+
+                            builder = InlineKeyboardBuilder()
+                            builder.button(
+                                text="Скачать целиком",
+                                callback_data=TaskAction(
+                                    action="dl_audio_full", task_id=task.id
+                                ),
+                            )
+                            builder.button(
+                                text="Нарезать по таймкодам",
+                                callback_data=TaskAction(
+                                    action="dl_audio_cut", task_id=task.id
+                                ),
+                            )
+                            builder.adjust(1)
+
+                            text = base_text + "_Найдены таймкоды. Выберите формат:_"
+                            markup = builder.as_markup()
+                        else:
+                            task.status = "ready_to_download"
+                            await session.commit()
+
+                            text = base_text + "_Очередь на скачивание..._"
+                            markup = None
+
+                        try:
+                            # Если у нас есть превью и изначальное сообщение было с фото (MAIN_PHOTO_ID)
+                            if thumbnail_url and settings.MAIN_PHOTO_ID:
+                                media = InputMediaPhoto(
+                                    media=thumbnail_url,
+                                    caption=text,
+                                    parse_mode="Markdown",
+                                )
+                                await bot.edit_message_media(
+                                    chat_id=task.chat_id,
+                                    message_id=task.message_id,
+                                    media=media,
+                                    reply_markup=markup,
+                                )
+                            # Фолбэк: если превью нет, но было системное фото
+                            elif settings.MAIN_PHOTO_ID:
+                                await bot.edit_message_caption(
+                                    chat_id=task.chat_id,
+                                    message_id=task.message_id,
+                                    caption=text,
+                                    reply_markup=markup,
+                                    parse_mode="Markdown",
+                                )
+                            # Фолбэк: если фото вообще не было (текстовое сообщение)
+                            else:
+                                await bot.edit_message_text(
+                                    chat_id=task.chat_id,
+                                    message_id=task.message_id,
+                                    text=text,
+                                    reply_markup=markup,
+                                    parse_mode="Markdown",
+                                    disable_web_page_preview=True,
+                                )
+                        except Exception as e:
+                            logger.error(f"Ошибка обновления UI Telegram: {e}")
 
     except WebSocketDisconnect:
         # Воркер отвалился. Начинаем процедуру спасения задач.

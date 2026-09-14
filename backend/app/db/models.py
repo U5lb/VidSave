@@ -19,8 +19,9 @@ class Task(Base):
     message_id: Mapped[int | None] = mapped_column()
 
     url: Mapped[str] = mapped_column(String)
-    format_type: Mapped[str | None] = mapped_column(
-        String
-    )  # Хранит 'audio' или 'video'
+    format_type: Mapped[str | None] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="draft")
     worker_id: Mapped[str | None] = mapped_column(String)
+
+    title: Mapped[str | None] = mapped_column(String)
+    channel: Mapped[str | None] = mapped_column(String)

@@ -54,8 +54,6 @@ async def get_photo_id(message: Message):
 
 @router.message(F.text)
 async def handle_youtube_links(message: Message, session: AsyncSession):
-    if message.photo is None:
-        return
     if message.from_user is None:
         return
     if not message.entities:
@@ -116,16 +114,9 @@ async def handle_youtube_links(message: Message, session: AsyncSession):
 async def process_format_selection(
     callback: CallbackQuery, callback_data: TaskAction, session: AsyncSession
 ):
+    if callback.message is None or callback.from_user is None:
+        return
 
-    if callback.message is None:
-        return
-    if callback.from_user is None:
-        return
-    """
-    Обработка выбора формата.
-    Включает механизм повторных попыток отправки задачи воркеру (retry_logic).
-    Если воркеры недоступны, задача сохраняется со статусом 'pending'.
-    """
     await callback.answer()
 
     if not isinstance(callback.message, Message):
@@ -136,34 +127,19 @@ async def process_format_selection(
 
     task = await session.get(Task, callback_data.task_id)
     if not task:
-        # await callback.message.edit_text("Ошибка: Задача устарела или не найдена.")
         await callback.answer(text="Задача устарела или не найдена.", show_alert=True)
         return
 
-    # Фиксация выбора пользователя и координат интерфейса
+    # Запись параметров задачи в базу данных.
+    # База данных выступает в роли очереди (Message Queue).
     task.chat_id = callback.message.chat.id
     task.message_id = callback.message.message_id
     task.format_type = callback_data.action
     task.status = "pending"
     await session.commit()
 
-    await callback.message.edit_caption(caption="Подключение к воркеру...")
-
-    payload = {"task_id": task.id, "url": task.url, "action": task.format_type}
-
-    # Попытка отправки с интервалом
-    worker_id = "orangepi_1"
-    success = await ws_manager.send_task(worker_id, payload)
-
-    if not success:
-        await asyncio.sleep(2.0)
-        success = await ws_manager.send_task(worker_id, payload)
-
-    if success:
-        task.status = "fetching_meta"
-        await session.commit()
-        await callback.message.edit_caption(caption="Анализ медиаданных...")
-    else:
-        await callback.message.edit_caption(
-            caption="Воркеры временно недоступны. Ссылки сохранены в очередь, скачивание начнется автоматически."
-        )
+    # Сразу обновляем интерфейс для пользователя, не дожидаясь ответа от воркеров.
+    # Как только любой свободный воркер заберет задачу из БД, статус поменяется автоматически через WebSocket-шлюз.
+    await callback.message.edit_caption(
+        caption="Добавлено в очередь. Ожидание свободного сервера..."
+    )
