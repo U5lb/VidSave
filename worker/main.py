@@ -1,7 +1,10 @@
 import asyncio
+import glob
 import json
 import logging
+import os
 
+import aiohttp
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -10,10 +13,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SERVER_URL = "ws://127.0.0.1:8000/ws/worker/orangepi_1?token=mysecter123"
+SERVER_URL = os.getenv("SERVER_URL")
+TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", "http://telegram-api:8081")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "vidsave_bot")
+
+if not all([SERVER_URL, BOT_TOKEN]):
+    raise ValueError(
+        "Критическая ошибка: отсутствуют переменные окружения SERVER_URL или BOT_TOKEN."
+    )
+
+DOWNLOADS_DIR = "/app/downloads"
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 
-async def get_video_meta(url: str):
+async def get_video_meta(url: str) -> dict | None:
     process = await asyncio.create_subprocess_exec(
         "yt-dlp",
         "-J",
@@ -22,99 +36,234 @@ async def get_video_meta(url: str):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await process.communicate()
+    stdout, _ = await process.communicate()
     if process.returncode == 0:
         return json.loads(stdout.decode("utf-8"))
     return None
 
 
-async def download_media(url: str, format_type: str, task_id: int):
-    logger.info(f"Начинаю скачивание задачи {task_id}")
+async def get_video_dimensions(file_path: str) -> tuple[int, int]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            file_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode == 0 and stdout:
+            w, h = stdout.decode("utf-8").strip().split("x")
+            return int(w), int(h)
+    except Exception as e:
+        logger.error(f"Ошибка получения размеров: {e}")
+    return 1280, 720
 
-    # Базовые флаги: без плейлистов, встроить мету, встроить обложку
-    args = ["yt-dlp", "--no-playlist", "--embed-metadata", "--embed-thumbnail"]
+
+async def download_media(url: str, format_type: str, task_id: int) -> bool:
+    logger.info(f"Начало скачивания задачи {task_id}")
+    args = ["yt-dlp", "--no-playlist", "--embed-metadata"]
 
     if format_type in ["audio", "audio_cut"]:
-        args.extend(["-f", "bestaudio", "-x", "--audio-format", "mp3"])
-
+        args.extend(
+            ["--embed-thumbnail", "-f", "bestaudio", "-x", "--audio-format", "mp3"]
+        )
         if format_type == "audio_cut":
-            # Разделение по таймкодам.
-            # Специальный синтаксис output для генерации множества файлов: chapter:ШАБЛОН
-            args.extend(["--split-chapters"])
-            args.extend(["-o", f"chapter:{task_id}_%(section_title)s.%(ext)s"])
+            args.extend(
+                [
+                    "--split-chapters",
+                    "-o",
+                    f"chapter:{DOWNLOADS_DIR}/chapter_{task_id}_%(section_number)02d_%(section_title)s.%(ext)s",
+                    "-o",
+                    f"{DOWNLOADS_DIR}/main_{task_id}_media.%(ext)s",
+                ]
+            )
         else:
-            args.extend(["-o", f"{task_id}_%(title)s.%(ext)s"])
+            args.extend(["-o", f"{DOWNLOADS_DIR}/{task_id}_media.%(ext)s"])
     else:
-        # Видео
-        args.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
-        args.extend(["-o", f"{task_id}_%(title)s.%(ext)s"])
+        args.extend(
+            [
+                "-f",
+                "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[vcodec^=avc1]/best",
+                "--merge-output-format",
+                "mp4",
+                "-o",
+                f"{DOWNLOADS_DIR}/{task_id}_media.%(ext)s",
+            ]
+        )
+
+    args.append(url)
+
+    env = os.environ.copy()
+    env["PATH"] = f"/root/.deno/bin:{env.get('PATH', '')}"
 
     process = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
+    )
+
+    async def read_stream(stream, is_error=False):
+        while line := await stream.readline():
+            text = line.decode("utf-8", errors="ignore").strip()
+            if text:
+                if is_error:
+                    logger.error(f"[yt-dlp] {text}")
+                else:
+                    logger.info(f"[yt-dlp] {text}")
+
+    await asyncio.gather(
+        read_stream(process.stdout), read_stream(process.stderr, is_error=True)
     )
     await process.wait()
+    return process.returncode == 0
 
-    if process.returncode == 0:
-        logger.info(f"Задача {task_id} скачана.")
-        return True
+
+async def upload_to_telegram(
+    task_data: dict, file_path: str, format_type: str, task_id: int
+) -> bool:
+    chat_id = task_data.get("chat_id")
+    message_id = task_data.get("message_id")
+    is_audio = file_path.endswith((".mp3", ".m4a"))
+    title = task_data.get("title", "Медиа")
+
+    # Парсинг названия трека из шаблона yt-dlp
+    if is_audio and format_type == "audio_cut" and "chapter_" in file_path:
+        parts = os.path.basename(file_path).split(f"_{task_id}_", 1)
+        if len(parts) == 2:
+            track_title = parts[1].rsplit(".", 1)[0]
+            if track_title[:2].isdigit() and track_title[2] == "_":
+                track_title = track_title[3:]
+            title = f"{title} - {track_title}"
+
+    api_endpoint = (
+        f"{TELEGRAM_API_URL}/bot{BOT_TOKEN}/{'sendAudio' if is_audio else 'sendVideo'}"
+    )
+
+    payload = {
+        "chat_id": chat_id,
+        "reply_to_message_id": message_id,
+        "caption": f"*{title}*\n_Скачано через @{BOT_USERNAME}_",
+        "parse_mode": "Markdown",
+    }
+
+    if is_audio:
+        payload["audio"] = f"file://{os.path.abspath(file_path)}"
+        payload["title"] = title
     else:
-        logger.error("Ошибка скачивания")
+        payload["video"] = f"file://{os.path.abspath(file_path)}"
+        payload["supports_streaming"] = True
+        w, h = await get_video_dimensions(file_path)
+        payload["width"] = w
+        payload["height"] = h
+
+    logger.info(f"Выгрузка {file_path} в Telegram...")
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=60, sock_read=None)
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(api_endpoint, json=payload) as resp:
+                result = await resp.json()
+                if not result.get("ok"):
+                    logger.error(f"Ошибка Telegram API: {result}")
+                    return False
+                return True
+    except Exception as e:
+        logger.error(f"Ошибка выгрузки: {e}")
         return False
 
 
-async def process_task(task_data: dict, websocket):
+async def handle_download_and_upload(task_data: dict, websocket):
     task_id = task_data.get("task_id")
-    url = task_data.get("url")
     format_type = task_data.get("format_type")
+
+    await websocket.send(
+        json.dumps(
+            {"action": "status_update", "task_id": task_id, "status": "downloading"}
+        )
+    )
+
+    if not await download_media(task_data.get("url"), format_type, task_id):
+        await websocket.send(json.dumps({"action": "error", "task_id": task_id}))
+        return
+
+    await websocket.send(
+        json.dumps(
+            {"action": "status_update", "task_id": task_id, "status": "uploading"}
+        )
+    )
+
+    if format_type == "audio_cut":
+        main_file = f"{DOWNLOADS_DIR}/main_{task_id}_media.mp3"
+        if os.path.exists(main_file):
+            try:
+                os.remove(main_file)
+            except OSError as e:
+                logger.error(
+                    f"Не удалось удалить основной файл нарезки {main_file}: {e}"
+                )
+        downloaded_files = sorted(glob.glob(f"{DOWNLOADS_DIR}/chapter_{task_id}_*"))
+    else:
+        downloaded_files = sorted(glob.glob(f"{DOWNLOADS_DIR}/*{task_id}_*"))
+
+    for file_path in downloaded_files:
+        await upload_to_telegram(task_data, file_path, format_type, task_id)
+        try:
+            os.remove(file_path)
+        except OSError as e:
+            logger.error(f"Ошибка удаления файла {file_path}: {e}")
+
+        await asyncio.sleep(1.5)
+
+    await websocket.send(
+        json.dumps({"action": "download_complete", "task_id": task_id})
+    )
+
+
+async def process_task(task_data: dict, websocket):
     command = task_data.get("command")
+    task_id = task_data.get("task_id")
 
     if command == "get_meta":
-        meta = await get_video_meta(url)
+        meta = await get_video_meta(task_data.get("url"))
         if meta:
-            has_timecodes = bool(meta.get("chapters"))
-            title = meta.get("title", "Без названия")
-            channel = meta.get("uploader", "Неизвестный канал")
-            # Вытаскиваем прямую ссылку на превью в максимальном качестве
-            thumbnail = meta.get("thumbnail")
-
             await websocket.send(
                 json.dumps(
                     {
                         "action": "meta_ready",
                         "task_id": task_id,
-                        "has_timecodes": has_timecodes,
-                        "title": title,
-                        "channel": channel,
-                        "thumbnail": thumbnail,
+                        "has_timecodes": bool(meta.get("chapters")),
+                        "title": meta.get("title", "Без названия"),
+                        "channel": meta.get("uploader", "Неизвестный канал"),
+                        "thumbnail": meta.get("thumbnail"),
                     }
                 )
             )
-
     elif command == "download":
-        success = await download_media(url, format_type, task_id)
-        if success:
-            await websocket.send(
-                json.dumps({"action": "download_complete", "task_id": task_id})
-            )
+        await handle_download_and_upload(task_data, websocket)
 
 
 async def worker_loop():
     try:
         async with connect(SERVER_URL) as websocket:
-            logger.info("Соединение установлено. Запрашиваю задачи...")
+            logger.info("Соединение со шлюзом установлено. Запрос задач...")
             while True:
                 await websocket.send(json.dumps({"action": "get_task"}))
-                response = await websocket.recv()
-                data = json.loads(response)
+                response = json.loads(await websocket.recv())
 
-                if data.get("action") == "idle":
+                if response.get("action") == "idle":
                     await asyncio.sleep(5)
-                elif "task_id" in data:
-                    await process_task(data, websocket)
+                elif "task_id" in response:
+                    asyncio.create_task(process_task(response, websocket))
     except ConnectionClosed:
-        logger.warning("Соединение с сервером разорвано.")
+        logger.warning("Соединение разорвано. Переподключение...")
     except Exception as e:
-        logger.error(f"Непредвиденная ошибка: {e}")
+        logger.error(f"Системная ошибка воркера: {e}")
 
 
 async def main():

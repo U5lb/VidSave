@@ -21,59 +21,47 @@ class TaskAction(CallbackData, prefix="task"):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    """
-    Обработчик стартовой команды.
-    Отображает текущее состояние кластера воркеров.
-    """
     workers_online = ws_manager.workers_count
     status_text = (
-        f"Активных серверов для скачивания: {workers_online}"
+        f"Активных серверов: {workers_online}"
         if workers_online > 0
-        else "Серверы скачивания временно недоступны."
+        else "Серверы временно недоступны."
     )
     text = f"Панель управления загрузками.\n\n{status_text}"
 
     if settings.MAIN_PHOTO_ID:
-        await message.answer_photo(
-            photo=settings.MAIN_PHOTO_ID,
-            caption=text,
-        )
+        await message.answer_photo(photo=settings.MAIN_PHOTO_ID, caption=text)
     else:
         await message.answer(text=text)
 
 
 @router.message(F.photo)
 async def get_photo_id(message: Message):
-    if message.photo is None:
-        return
-    photo_id = message.photo[-1].file_id
-    await message.answer(
-        f"ID фото для .env:\n`MAIN_PHOTO_ID={photo_id}`", parse_mode="Markdown"
-    )
+    if message.photo:
+        await message.answer(
+            f"ID фото для .env:\n`MAIN_PHOTO_ID={message.photo[-1].file_id}`",
+            parse_mode="Markdown",
+        )
 
 
 @router.message(F.text)
 async def handle_youtube_links(message: Message, session: AsyncSession):
-    if message.from_user is None:
+    if not message.from_user or not message.entities:
         return
-    if not message.entities:
-        return
-    """
-    Парсинг YouTube ссылок, очистка чата от исходного сообщения
-    и формирование черновика задачи в БД.
-    """
 
-    youtube_links = []
-    for entity in message.entities:
-        if entity.type == "url" and message.text:
-            url = entity.extract_from(message.text)
-            if "youtube.com" in url or "youtu.be" in url:
-                youtube_links.append(url)
+    youtube_links = [
+        entity.extract_from(message.text)
+        for entity in message.entities
+        if entity.type == "url"
+        and (
+            "youtube.com" in entity.extract_from(message.text)
+            or "youtu.be" in entity.extract_from(message.text)
+        )
+    ]
 
     if not youtube_links:
         return
 
-    # Безопасное удаление сообщения пользователя с ссылками
     try:
         await message.delete()
     except TelegramAPIError:
@@ -94,10 +82,8 @@ async def handle_youtube_links(message: Message, session: AsyncSession):
         builder.button(
             text="Аудио", callback_data=TaskAction(action="audio", task_id=new_task.id)
         )
-        builder.adjust(2)
 
         text = "Выберите формат скачивания:"
-
         if settings.MAIN_PHOTO_ID:
             await message.answer_photo(
                 photo=settings.MAIN_PHOTO_ID,
@@ -110,11 +96,13 @@ async def handle_youtube_links(message: Message, session: AsyncSession):
         await message.answer("Пакетная обработка в разработке.")
 
 
-@router.callback_query(TaskAction.filter(F.action.in_(["video", "audio"])))
+@router.callback_query(
+    TaskAction.filter(F.action.in_(["video", "audio", "dl_audio_full", "dl_audio_cut"]))
+)
 async def process_format_selection(
     callback: CallbackQuery, callback_data: TaskAction, session: AsyncSession
 ):
-    if callback.message is None or callback.from_user is None:
+    if not callback.message or not callback.from_user:
         return
 
     await callback.answer()
@@ -127,19 +115,23 @@ async def process_format_selection(
 
     task = await session.get(Task, callback_data.task_id)
     if not task:
-        await callback.answer(text="Задача устарела или не найдена.", show_alert=True)
+        await callback.answer(text="Задача не найдена.", show_alert=True)
         return
 
-    # Запись параметров задачи в базу данных.
-    # База данных выступает в роли очереди (Message Queue).
     task.chat_id = callback.message.chat.id
     task.message_id = callback.message.message_id
-    task.format_type = callback_data.action
-    task.status = "pending"
-    await session.commit()
 
-    # Сразу обновляем интерфейс для пользователя, не дожидаясь ответа от воркеров.
-    # Как только любой свободный воркер заберет задачу из БД, статус поменяется автоматически через WebSocket-шлюз.
+    # Пропуск этапа get_meta для задач нарезки
+    if callback_data.action in ["dl_audio_full", "dl_audio_cut"]:
+        task.format_type = (
+            "audio" if callback_data.action == "dl_audio_full" else "audio_cut"
+        )
+        task.status = "ready_to_download"
+    else:
+        task.format_type = callback_data.action
+        task.status = "pending"
+
+    await session.commit()
     await callback.message.edit_caption(
-        caption="Добавлено в очередь. Ожидание свободного сервера..."
+        caption="Добавлено в очередь. Ожидание сервера..."
     )

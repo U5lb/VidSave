@@ -8,9 +8,10 @@ class Settings(BaseSettings):
     WEB_APP_URL: str
     MAIN_PHOTO_ID: str | None = None
     WORKER_TOKEN: SecretStr
+    BOT_USERNAME: str = "vidsave_bot"
 
     model_config = SettingsConfigDict(
-        env_file="../.env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
 

@@ -1,0 +1,44 @@
+---
+
+
+services:
+  vidsave_worker:
+    build: .
+    container_name: vidsave_pi_worker
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ramdisk_downloads:/app/downloads
+    networks:
+      - vpn_net
+
+  telegram-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: vidsave_telegram-api
+    restart: always
+    env_file:
+      - .env
+    environment:
+      TELEGRAM_LOCAL: "true"
+#      TELEGRAM_VERBOSITY: "3"
+    volumes:
+      - ramdisk_downloads:/app/downloads
+    networks:
+      - vpn_net
+
+volumes:
+  ramdisk_downloads:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=2500M,uid=1000,mode=1777
+
+networks:
+  vpn_net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1360
+    ipam:
+      config:
+        - subnet: 10.20.0.0/16
