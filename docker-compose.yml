@@ -1,0 +1,43 @@
+services:
+  vidsave-backend:
+    build: .
+    container_name: vidsave_backend
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      - postgres-db
+    networks:
+      - default # Для связи с БД
+      - proxy # Для работы traefic
+    labels:
+      - "traefik.enable=true"
+      # Замените api.u5lb.space на нужный домен для вашего сервиса
+      - "traefik.http.routers.vidsave.rule=Host(`api.u5lb.space`)"
+      - "traefik.http.routers.vidsave.entrypoints=websecure"
+      - "traefik.http.routers.vidsave.tls.certresolver=letsencrypt"
+      # Указываем порт, который слушает ваше приложение ВНУТРИ контейнера
+      - "traefik.http.services.vidsave.loadbalancer.server.port=8000"
+
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: db_postgress_vidsave
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+
+# Объявляем внешнюю сеть Traefik
+networks:
+  proxy:
+    external: true

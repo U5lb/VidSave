@@ -1,0 +1,4 @@
+websockets
+yt-dlp
+aiohttp
+pydantic-settings
