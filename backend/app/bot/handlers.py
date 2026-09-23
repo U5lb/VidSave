@@ -28,20 +28,16 @@ async def cmd_start(message: Message):
         else "Серверы временно недоступны."
     )
     text = f"Панель управления загрузками.\n\n{status_text}"
-
-    if settings.MAIN_PHOTO_ID:
-        await message.answer_photo(photo=settings.MAIN_PHOTO_ID, caption=text)
-    else:
-        await message.answer(text=text)
+    await message.answer_photo(photo=settings.MAIN_PHOTO_ID, caption=text)
 
 
-@router.message(F.photo)
-async def get_photo_id(message: Message):
-    if message.photo:
-        await message.answer(
-            f"ID фото для .env:\n`MAIN_PHOTO_ID={message.photo[-1].file_id}`",
-            parse_mode="Markdown",
-        )
+# @router.message(F.photo)
+# async def get_photo_id(message: Message):
+#    if message.photo:
+#        await message.answer(
+#            f"ID фото для .env:\n`MAIN_PHOTO_ID={message.photo[-1].file_id}`",
+#            parse_mode="Markdown",
+#        )
 
 
 @router.message(F.text)
@@ -84,14 +80,12 @@ async def handle_youtube_links(message: Message, session: AsyncSession):
         )
 
         text = "Выберите формат скачивания:"
-        if settings.MAIN_PHOTO_ID:
-            await message.answer_photo(
-                photo=settings.MAIN_PHOTO_ID,
-                caption=text,
-                reply_markup=builder.as_markup(),
-            )
-        else:
-            await message.answer(text=text, reply_markup=builder.as_markup())
+        await message.answer_photo(
+            photo=settings.MAIN_PHOTO_ID,
+            caption=text,
+            reply_markup=builder.as_markup(),
+        )
+
     else:
         await message.answer("Пакетная обработка в разработке.")
 

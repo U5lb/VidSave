@@ -63,7 +63,7 @@ async def update_telegram_ui(
     task: Task, text: str, markup=None, thumbnail_url: str = None
 ):
     try:
-        if thumbnail_url and settings.MAIN_PHOTO_ID:
+        if thumbnail_url:
             media = InputMediaPhoto(
                 media=thumbnail_url, caption=text, parse_mode="Markdown"
             )
@@ -73,22 +73,13 @@ async def update_telegram_ui(
                 media=media,
                 reply_markup=markup,
             )
-        elif settings.MAIN_PHOTO_ID:
+        else:
             await bot.edit_message_caption(
                 chat_id=task.chat_id,
                 message_id=task.message_id,
                 caption=text,
                 reply_markup=markup,
                 parse_mode="Markdown",
-            )
-        else:
-            await bot.edit_message_text(
-                chat_id=task.chat_id,
-                message_id=task.message_id,
-                text=text,
-                reply_markup=markup,
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
             )
     except Exception as e:
         logger.error(f"Ошибка обновления UI: {e}")

@@ -6,7 +6,9 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     DB_URL: str
     WEB_APP_URL: str
-    MAIN_PHOTO_ID: str | None = None
+    MAIN_PHOTO_ID: str = (
+        "https://raw.githubusercontent.com/u5lb/VidSave/main/backend/assets/avatar.jpg"
+    )
     WORKER_TOKEN: SecretStr
     BOT_USERNAME: str = "vidsave_bot"
 
